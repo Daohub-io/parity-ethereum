@@ -50,6 +50,7 @@ pub mod ids {
 	pub const ELOG_FUNC: usize = 210;
 	pub const CREATE2_FUNC: usize = 220;
 	pub const GASLEFT_FUNC: usize = 230;
+	pub const EXTCODESIZE_FUNC: usize = 240;
 
 	pub const PANIC_FUNC: usize = 1000;
 	pub const DEBUG_FUNC: usize = 1010;
@@ -193,6 +194,11 @@ pub mod signatures {
 		None,
 	);
 
+	pub const EXTCODESIZE: StaticSignature = StaticSignature(
+		&[I32],
+		Some(I32),
+	);
+
 	impl Into<wasmi::Signature> for StaticSignature {
 		fn into(self) -> wasmi::Signature {
 			wasmi::Signature::new(self.0, self.1)
@@ -281,6 +287,7 @@ impl wasmi::ModuleImportResolver for ImportResolver {
 			"sender" => host(signatures::SENDER, ids::SENDER_FUNC),
 			"origin" => host(signatures::ORIGIN, ids::ORIGIN_FUNC),
 			"elog" => host(signatures::ELOG, ids::ELOG_FUNC),
+			"extcodesize" => host(signatures::EXTCODESIZE, ids::EXTCODESIZE_FUNC),
 			"create2" if self.have_create2 => host(signatures::CREATE2, ids::CREATE2_FUNC),
 			"gasleft" if self.have_gasleft => host(signatures::GASLEFT, ids::GASLEFT_FUNC),
 			_ => {

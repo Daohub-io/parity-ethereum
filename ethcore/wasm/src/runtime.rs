@@ -67,6 +67,8 @@ pub enum Error {
 	BadUtf8,
 	/// Log event error
 	Log,
+	/// Ext code size error
+	ExtCodeSizeError,
 	/// Other error in native code
 	Other,
 	/// Syscall signature mismatch
@@ -128,6 +130,7 @@ impl ::std::fmt::Display for Error {
 			Error::BadUtf8 => write!(f, "String encoding is bad utf-8 sequence"),
 			Error::GasLimit => write!(f, "Invocation resulted in gas limit violated"),
 			Error::Log => write!(f, "Error occured while logging an event"),
+			Error::ExtCodeSizeError => write!(f, "Error occured while trying to query the size of a contract"),
 			Error::InvalidSyscall => write!(f, "Invalid syscall signature encountered at runtime"),
 			Error::Other => write!(f, "Other unspecified error"),
 			Error::Unreachable => write!(f, "Unreachable instruction encountered"),
@@ -742,6 +745,16 @@ impl<'a> Runtime<'a> {
 
 		Ok(())
 	}
+
+	///	Signature: `extcodesize() -> i32`
+	pub fn extcodesize(&mut self, args: RuntimeArgs) -> Result<RuntimeValue> {
+		let address = self.address_at(args.nth_checked(0)?)?;
+		let code_size = self.ext.extcodesize(&address).map_err(|_| Error::ExtCodeSizeError)?;
+		match code_size {
+			None => Ok(RuntimeValue::from(0)),
+			Some(size) => Ok(RuntimeValue::from(size as i32)),
+		}
+	}
 }
 
 mod ext_impl {
@@ -794,6 +807,7 @@ mod ext_impl {
 				ELOG_FUNC => void!(self.elog(args)),
 				CREATE2_FUNC => some!(self.create2(args)),
 				GASLEFT_FUNC => some!(self.gasleft()),
+				EXTCODESIZE_FUNC => some!(self.extcodesize(args)),
 				_ => panic!("env module doesn't provide function at index {}", index),
 			}
 		}
