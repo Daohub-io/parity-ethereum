@@ -69,6 +69,8 @@ pub enum Error {
 	Log,
 	/// Ext code size error
 	ExtCodeSizeError,
+	/// Ext code copy error
+	ExtCodeCopyError,
 	/// Other error in native code
 	Other,
 	/// Syscall signature mismatch
@@ -131,6 +133,7 @@ impl ::std::fmt::Display for Error {
 			Error::GasLimit => write!(f, "Invocation resulted in gas limit violated"),
 			Error::Log => write!(f, "Error occured while logging an event"),
 			Error::ExtCodeSizeError => write!(f, "Error occured while trying to query the size of a contract"),
+			Error::ExtCodeCopyError => write!(f, "Error occured while trying to copy the code of a contract"),
 			Error::InvalidSyscall => write!(f, "Invalid syscall signature encountered at runtime"),
 			Error::Other => write!(f, "Other unspecified error"),
 			Error::Unreachable => write!(f, "Unreachable instruction encountered"),
@@ -755,6 +758,23 @@ impl<'a> Runtime<'a> {
 			Some(size) => Ok(RuntimeValue::from(size as i32)),
 		}
 	}
+
+	///	Copy the code from a contract at a given address to the memory location
+	///	indicated by the passed pointer.
+	pub fn extcodecopy(&mut self, args: RuntimeArgs) -> Result<()> {
+		let ptr: u32 = args.nth_checked(0)?;
+		let address = self.address_at(args.nth_checked(1)?)?;
+		// TODO: We haven't made any effort to charge the right amount, as it
+		// isn't necessary for our testing.
+		let code = self.ext.extcode(&address).map_err(|_| Error::ExtCodeCopyError)?;
+		match code {
+			None => Ok(()),
+			Some(code_arc) => {
+				self.memory.set(ptr, &code_arc)?;
+				Ok(())
+			},
+		}
+	}
 }
 
 mod ext_impl {
@@ -808,6 +828,7 @@ mod ext_impl {
 				CREATE2_FUNC => some!(self.create2(args)),
 				GASLEFT_FUNC => some!(self.gasleft()),
 				EXTCODESIZE_FUNC => some!(self.extcodesize(args)),
+				EXTCODECOPY_FUNC => void!(self.extcodecopy(args)),
 				_ => panic!("env module doesn't provide function at index {}", index),
 			}
 		}
