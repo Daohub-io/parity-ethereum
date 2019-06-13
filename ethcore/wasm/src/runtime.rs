@@ -356,6 +356,22 @@ impl<'a> Runtime<'a> {
 		Ok(())
 	}
 
+	/// Query the length of the result bytes
+	fn result_length(&mut self) -> RuntimeValue {
+		RuntimeValue::I32(self.result.len() as i32)
+	}
+
+	/// Write result bytes to the memory location using the passed pointer
+	fn fetch_result(&mut self, args: RuntimeArgs) -> Result<()> {
+		let ptr: u32 = args.nth_checked(0)?;
+
+		let args_len = self.result.len() as u64;
+		self.charge(|s| args_len * s.wasm().memcpy as u64)?;
+
+		self.memory.set(ptr, &self.result[..])?;
+		Ok(())
+	}
+
 	/// User panic
 	///
 	/// Contract can invoke this when he encounters unrecoverable error.
@@ -807,6 +823,8 @@ mod ext_impl {
 				GAS_FUNC => void!(self.gas(args)),
 				INPUT_LENGTH_FUNC => cast!(self.input_legnth()),
 				FETCH_INPUT_FUNC => void!(self.fetch_input(args)),
+				RESULT_LENGTH_FUNC => cast!(self.result_length()),
+				FETCH_RESULT_FUNC => void!(self.fetch_result(args)),
 				PANIC_FUNC => void!(self.panic(args)),
 				DEBUG_FUNC => void!(self.debug(args)),
 				CCALL_FUNC => some!(self.ccall(args)),

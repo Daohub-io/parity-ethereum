@@ -52,6 +52,8 @@ pub mod ids {
 	pub const GASLEFT_FUNC: usize = 230;
 	pub const EXTCODESIZE_FUNC: usize = 240;
 	pub const EXTCODECOPY_FUNC: usize = 250;
+	pub const FETCH_RESULT_FUNC: usize = 260;
+	pub const RESULT_LENGTH_FUNC: usize = 270;
 
 	pub const PANIC_FUNC: usize = 1000;
 	pub const DEBUG_FUNC: usize = 1010;
@@ -205,6 +207,16 @@ pub mod signatures {
 		None,
 	);
 
+	pub const FETCH_RESULT: StaticSignature = StaticSignature(
+		&[I32],
+		None,
+	);
+
+	pub const RESULT_LENGTH: StaticSignature = StaticSignature(
+		&[],
+		Some(I32),
+	);
+
 	impl Into<wasmi::Signature> for StaticSignature {
 		fn into(self) -> wasmi::Signature {
 			wasmi::Signature::new(self.0, self.1)
@@ -275,6 +287,8 @@ impl wasmi::ModuleImportResolver for ImportResolver {
 			"gas" => host(signatures::GAS, ids::GAS_FUNC),
 			"input_length" => host(signatures::INPUT_LENGTH, ids::INPUT_LENGTH_FUNC),
 			"fetch_input" => host(signatures::FETCH_INPUT, ids::FETCH_INPUT_FUNC),
+			"result_length" => host(signatures::RESULT_LENGTH, ids::RESULT_LENGTH_FUNC),
+			"fetch_result" => host(signatures::FETCH_RESULT, ids::FETCH_RESULT_FUNC),
 			"panic" => host(signatures::PANIC, ids::PANIC_FUNC),
 			"debug" => host(signatures::DEBUG, ids::DEBUG_FUNC),
 			"ccall" => host(signatures::CCALL, ids::CCALL_FUNC),
