@@ -36,6 +36,7 @@ pub struct Runtime<'a> {
 	memory: MemoryRef,
 	args: Vec<u8>,
 	result: Vec<u8>,
+	last_return: Vec<u8>,
 }
 
 /// User trap in native code
@@ -166,6 +167,7 @@ impl<'a> Runtime<'a> {
 			context: context,
 			args: args,
 			result: Vec::new(),
+			last_return: Vec::new(),
 		}
 	}
 
@@ -358,17 +360,17 @@ impl<'a> Runtime<'a> {
 
 	/// Query the length of the result bytes
 	fn result_length(&mut self) -> RuntimeValue {
-		RuntimeValue::I32(self.result.len() as i32)
+		RuntimeValue::I32(self.last_return.len() as i32)
 	}
 
 	/// Write result bytes to the memory location using the passed pointer
 	fn fetch_result(&mut self, args: RuntimeArgs) -> Result<()> {
 		let ptr: u32 = args.nth_checked(0)?;
 
-		let args_len = self.result.len() as u64;
+		let args_len = self.last_return.len() as u64;
 		self.charge(|s| args_len * s.wasm().memcpy as u64)?;
 
-		self.memory.set(ptr, &self.result[..])?;
+		self.memory.set(ptr, &self.last_return[..])?;
 		Ok(())
 	}
 
@@ -477,6 +479,7 @@ impl<'a> Runtime<'a> {
 
 		match call_result {
 			vm::MessageCallResult::Success(gas_left, data) => {
+				// copy the data into the return buffer
 				let len = cmp::min(result.len(), data.len());
 				(&mut result[..len]).copy_from_slice(&data[..len]);
 
@@ -486,6 +489,10 @@ impl<'a> Runtime<'a> {
 						/ self.ext.schedule().wasm().opcodes_mul as u64;
 
 				self.memory.set(result_ptr, &result)?;
+
+				// Copy the return data into the last_return buffer of the
+				// runtime
+				self.last_return = (*data).into();
 				Ok(0i32.into())
 			},
 			vm::MessageCallResult::Reverted(gas_left, data) => {
