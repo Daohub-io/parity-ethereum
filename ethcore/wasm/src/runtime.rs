@@ -469,6 +469,7 @@ impl<'a> Runtime<'a> {
 		let call_result = self.ext.call(
 			&gas.into(),
 			match call_type { CallType::DelegateCall => &self.context.sender, _ => &self.context.address },
+			// match call_type { CallType::CallCode => &self.context.address, _ => &self.context.address },
 			match call_type { CallType::Call | CallType::StaticCall => &address, _ => &self.context.address },
 			val,
 			&payload,
@@ -512,6 +513,12 @@ impl<'a> Runtime<'a> {
 			}
 		}
 	}
+
+	/// CALLCODE
+	fn call_code(&mut self, args: RuntimeArgs) -> Result<RuntimeValue> {
+		self.do_call(true, CallType::CallCode, args)
+	}
+
 
 	/// Message call
 	fn ccall(&mut self, args: RuntimeArgs) -> Result<RuntimeValue> {
@@ -854,6 +861,7 @@ mod ext_impl {
 				GASLEFT_FUNC => some!(self.gasleft()),
 				EXTCODESIZE_FUNC => some!(self.extcodesize(args)),
 				EXTCODECOPY_FUNC => void!(self.extcodecopy(args)),
+				CALL_CODE_FUNC => some!(self.call_code(args)),
 				_ => panic!("env module doesn't provide function at index {}", index),
 			}
 		}
