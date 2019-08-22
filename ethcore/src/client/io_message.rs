@@ -18,7 +18,7 @@ use std::fmt;
 use bytes::Bytes;
 use client::Client;
 use ethereum_types::H256;
-use snapshot::ManifestData;
+use types::snapshot::ManifestData;
 
 /// Message type for external and internal events
 #[derive(Debug)]
@@ -47,7 +47,7 @@ impl ClientIoMessage {
 }
 
 /// A function to invoke in the client thread.
-pub struct Callback(pub Box<Fn(&Client) + Send + Sync>);
+pub struct Callback(pub Box<dyn Fn(&Client) + Send + Sync>);
 
 impl fmt::Debug for Callback {
 	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {

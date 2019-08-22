@@ -22,28 +22,31 @@ use ethkey::KeyPair;
 use hash::keccak;
 use io::IoChannel;
 use tempdir::TempDir;
-use types::transaction::{PendingTransaction, Transaction, Action, Condition};
-use types::filter::Filter;
-use types::view;
-use types::views::BlockView;
+use types::{
+	ids::BlockId,
+	transaction::{PendingTransaction, Transaction, Action, Condition},
+	filter::Filter,
+	verification::Unverified,
+	view,
+	views::BlockView,
+};
 
-use client::{BlockChainClient, BlockChainReset, Client, ClientConfig, BlockId, ChainInfo, BlockInfo, PrepareOpenBlock, ImportSealedBlock, ImportBlock};
-use ethereum;
-use executive::{Executive, TransactOptions};
+use client::{Client, ClientConfig, PrepareOpenBlock, ImportSealedBlock};
+use client_traits::{BlockInfo, BlockChainClient, BlockChainReset, ChainInfo, ImportBlock};
+use crate::spec;
+use machine::executive::{Executive, TransactOptions};
 use miner::{Miner, PendingOrdering, MinerService};
-use spec::Spec;
-use state::{self, State, CleanupMode};
+use account_state::{State, CleanupMode, backend};
 use test_helpers::{
 	self,
 	generate_dummy_client, push_blocks_to_client, get_test_client_with_blocks, get_good_dummy_block_seq,
 	generate_dummy_client_with_data, get_good_dummy_block, get_bad_state_dummy_block
 };
-use verification::queue::kind::blocks::Unverified;
 
 #[test]
 fn imports_from_empty() {
 	let db = test_helpers::new_db();
-	let spec = Spec::new_test();
+	let spec = spec::new_test();
 
 	let client = Client::new(
 		ClientConfig::default(),
@@ -60,7 +63,7 @@ fn imports_from_empty() {
 fn should_return_registrar() {
 	let db = test_helpers::new_db();
 	let tempdir = TempDir::new("").unwrap();
-	let spec = ethereum::new_morden(&tempdir.path().to_owned());
+	let spec = spec::new_morden(&tempdir.path().to_owned());
 
 	let client = Client::new(
 		ClientConfig::default(),
@@ -69,17 +72,14 @@ fn should_return_registrar() {
 		Arc::new(Miner::new_for_tests(&spec, None)),
 		IoChannel::disconnected(),
 	).unwrap();
-	let params = client.additional_params();
-	let address = &params["registrar"];
-
-	assert_eq!(address.len(), 40);
-	assert!(U256::from_str(address).is_ok());
+	let address = client.registrar_address();
+	assert_eq!(address, Some("52dff57a8a1532e6afb3dc07e2af58bb9eb05b3d".parse().unwrap()));
 }
 
 #[test]
 fn returns_state_root_basic() {
 	let client = generate_dummy_client(6);
-	let test_spec = Spec::new_test();
+	let test_spec = spec::new_test();
 	let genesis_header = test_spec.genesis_header();
 
 	assert!(client.state_data(genesis_header.state_root()).is_some());
@@ -88,7 +88,7 @@ fn returns_state_root_basic() {
 #[test]
 fn imports_good_block() {
 	let db = test_helpers::new_db();
-	let spec = Spec::new_test();
+	let spec = spec::new_test();
 
 	let client = Client::new(
 		ClientConfig::default(),
@@ -111,7 +111,7 @@ fn imports_good_block() {
 #[test]
 fn query_none_block() {
 	let db = test_helpers::new_db();
-	let spec = Spec::new_test();
+	let spec = spec::new_test();
 
 	let client = Client::new(
 		ClientConfig::default(),
@@ -120,7 +120,7 @@ fn query_none_block() {
 		Arc::new(Miner::new_for_tests(&spec, None)),
 		IoChannel::disconnected(),
 	).unwrap();
-    let non_existant = client.block_header(BlockId::Number(188));
+	let non_existant = client.block_header(BlockId::Number(188));
 	assert!(non_existant.is_none());
 }
 
@@ -210,7 +210,7 @@ fn can_generate_gas_price_histogram() {
 	let client = generate_dummy_client_with_data(20, 1, slice_into![6354,8593,6065,4842,7845,7002,689,4958,4250,6098,5804,4320,643,8895,2296,8589,7145,2000,2512,1408]);
 
 	let hist = client.gas_price_corpus(20).histogram(5).unwrap();
-	let correct_hist = ::stats::Histogram { bucket_bounds: vec_into![643, 2294, 3945, 5596, 7247, 8898], counts: vec![4,2,4,6,4] };
+	let correct_hist = stats::Histogram { bucket_bounds: vec_into![643, 2294, 3945, 5596, 7247, 8898], counts: vec![4,2,4,6,4] };
 	assert_eq!(hist, correct_hist);
 }
 
@@ -251,7 +251,7 @@ fn can_mine() {
 	let dummy_blocks = get_good_dummy_block_seq(2);
 	let client = get_test_client_with_blocks(vec![dummy_blocks[0].clone()]);
 
-	let b = client.prepare_open_block(Address::default(), (3141562.into(), 31415620.into()), vec![]).unwrap().close().unwrap();
+	let b = client.prepare_open_block(Address::zero(), (3141562.into(), 31415620.into()), vec![]).unwrap().close().unwrap();
 
 	assert_eq!(*b.header.parent_hash(), view!(BlockView, &dummy_blocks[0]).header_view().hash());
 }
@@ -259,7 +259,7 @@ fn can_mine() {
 #[test]
 fn change_history_size() {
 	let db = test_helpers::new_db();
-	let test_spec = Spec::new_null();
+	let test_spec = spec::new_null();
 	let mut config = ClientConfig::default();
 
 	config.history = 2;
@@ -274,7 +274,7 @@ fn change_history_size() {
 		).unwrap();
 
 		for _ in 0..20 {
-			let mut b = client.prepare_open_block(Address::default(), (3141562.into(), 31415620.into()), vec![]).unwrap();
+			let mut b = client.prepare_open_block(Address::zero(), (3141562.into(), 31415620.into()), vec![]).unwrap();
 			b.block_mut().state_mut().add_balance(&address, &5.into(), CleanupMode::NoEmpty).unwrap();
 			b.block_mut().state_mut().commit().unwrap();
 			let b = b.close_and_lock().unwrap().seal(&*test_spec.engine, vec![]).unwrap();
@@ -301,7 +301,7 @@ fn does_not_propagate_delayed_transactions() {
 		nonce: 0.into(),
 		gas_price: 0.into(),
 		gas: 21000.into(),
-		action: Action::Call(Address::default()),
+		action: Action::Call(Address::zero()),
 		value: 0.into(),
 		data: Vec::new(),
 	}.sign(secret, None), Some(Condition::Number(2)));
@@ -309,7 +309,7 @@ fn does_not_propagate_delayed_transactions() {
 		nonce: 1.into(),
 		gas_price: 0.into(),
 		gas: 21000.into(),
-		action: Action::Call(Address::default()),
+		action: Action::Call(Address::zero()),
 		value: 0.into(),
 		data: Vec::new(),
 	}.sign(secret, None), None);
@@ -327,13 +327,13 @@ fn does_not_propagate_delayed_transactions() {
 
 #[test]
 fn transaction_proof() {
-	use ::client::ProvingBlockChainClient;
+	use client_traits::ProvingBlockChainClient;
 
 	let client = generate_dummy_client(0);
 	let address = Address::random();
-	let test_spec = Spec::new_test();
+	let test_spec = spec::new_test();
 	for _ in 0..20 {
-		let mut b = client.prepare_open_block(Address::default(), (3141562.into(), 31415620.into()), vec![]).unwrap();
+		let mut b = client.prepare_open_block(Address::zero(), (3141562.into(), 31415620.into()), vec![]).unwrap();
 		b.block_mut().state_mut().add_balance(&address, &5.into(), CleanupMode::NoEmpty).unwrap();
 		b.block_mut().state_mut().commit().unwrap();
 		let b = b.close_and_lock().unwrap().seal(&*test_spec.engine, vec![]).unwrap();
@@ -344,15 +344,15 @@ fn transaction_proof() {
 		nonce: 0.into(),
 		gas_price: 0.into(),
 		gas: 21000.into(),
-		action: Action::Call(Address::default()),
+		action: Action::Call(Address::zero()),
 		value: 5.into(),
 		data: Vec::new(),
 	}.fake_sign(address);
 
 	let proof = client.prove_transaction(transaction.clone(), BlockId::Latest).unwrap().1;
-	let backend = state::backend::ProofCheck::new(&proof);
+	let backend = backend::ProofCheck::new(&proof);
 
-	let mut factories = ::factory::Factories::default();
+	let mut factories = ::trie_vm_factories::Factories::default();
 	factories.accountdb = ::account_db::Factory::Plain; // raw state values, no mangled keys.
 	let root = *client.best_block_header().state_root();
 
@@ -363,7 +363,7 @@ fn transaction_proof() {
 	Executive::new(&mut state, &env_info, &machine, &schedule)
 		.transact(&transaction, TransactOptions::with_no_tracing().dont_check_nonce()).unwrap();
 
-	assert_eq!(state.balance(&Address::default()).unwrap(), 5.into());
+	assert_eq!(state.balance(&Address::zero()).unwrap(), 5.into());
 	assert_eq!(state.balance(&address).unwrap(), 95.into());
 }
 

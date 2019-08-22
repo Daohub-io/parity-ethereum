@@ -21,12 +21,14 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use types::basic_account::BasicAccount;
-use types::encoded;
-use types::filter::Filter as EthcoreFilter;
-use types::ids::BlockId;
-use types::receipt::Receipt;
-use ethcore::executed::ExecutionError;
+use types::{
+	basic_account::BasicAccount,
+	encoded,
+	errors::ExecutionError,
+	filter::Filter as EthcoreFilter,
+	ids::BlockId,
+	receipt::Receipt,
+};
 
 use jsonrpc_core::{Result, Error};
 use jsonrpc_core::futures::{future, Future};
@@ -37,11 +39,12 @@ use light::client::LightChainClient;
 use light::{cht, MAX_HEADERS_PER_REQUEST};
 use light::on_demand::{
 	request, OnDemandRequester, HeaderRef, Request as OnDemandRequest,
-	Response as OnDemandResponse, ExecutionResult,
+	Response as OnDemandResponse,
 };
 use light::on_demand::error::Error as OnDemandError;
 use light::request::Field;
 use light::TransactionQueue;
+use machine::executed::ExecutionResult;
 
 use sync::{LightNetworkDispatcher, ManageNetwork, LightSyncProvider};
 
@@ -261,6 +264,7 @@ where
 		//       (they don't have state) we can safely fallback to `Latest`.
 		let id = match num.unwrap_or_default() {
 			BlockNumber::Num(n) => BlockId::Number(n),
+			BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 			BlockNumber::Earliest => BlockId::Earliest,
 			BlockNumber::Latest => BlockId::Latest,
 			BlockNumber::Pending => {
@@ -737,7 +741,7 @@ where
 	tx: EthTransaction,
 	hdr: encoded::Header,
 	env_info: ::vm::EnvInfo,
-	engine: Arc<::ethcore::engines::EthEngine>,
+	engine: Arc<engine::Engine>,
 	on_demand: Arc<OD>,
 	sync: Arc<S>,
 }

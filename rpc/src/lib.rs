@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Parity RPC.
+//! Parity Ethereum JSON-RPC Servers (WS, HTTP, IPC).
 
 #![warn(missing_docs, unused_extern_crates)]
 #![cfg_attr(feature = "cargo-clippy", warn(clippy::all, clippy::pedantic))]
@@ -43,6 +43,7 @@ extern crate futures;
 extern crate ansi_term;
 extern crate cid;
 extern crate itertools;
+extern crate machine;
 extern crate multihash;
 extern crate order_stat;
 extern crate parking_lot;
@@ -60,6 +61,7 @@ extern crate jsonrpc_http_server as http;
 extern crate jsonrpc_ipc_server as ipc;
 extern crate jsonrpc_pubsub;
 
+extern crate client_traits;
 extern crate common_types as types;
 extern crate ethash;
 extern crate ethcore;
@@ -82,8 +84,10 @@ extern crate parity_updater as updater;
 extern crate parity_version as version;
 extern crate eip_712;
 extern crate rlp;
+extern crate account_state;
 extern crate stats;
 extern crate tempdir;
+extern crate trace;
 extern crate vm;
 
 #[cfg(any(test, feature = "ethcore-accounts"))]
@@ -96,6 +100,12 @@ extern crate tiny_keccak;
 extern crate log;
 #[macro_use]
 extern crate serde_derive;
+
+#[cfg(test)]
+extern crate rand_xorshift;
+
+#[cfg(test)]
+extern crate engine;
 
 #[cfg(test)]
 extern crate ethjson;

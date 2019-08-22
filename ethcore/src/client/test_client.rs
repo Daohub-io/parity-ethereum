@@ -16,9 +16,11 @@
 
 //! Test client.
 
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrder};
 use std::sync::Arc;
 use std::collections::{HashMap, BTreeMap};
+use blockchain::BlockProvider;
 use std::mem;
 
 use blockchain::{TreeRoute, BlockReceipts};
@@ -35,41 +37,50 @@ use kvdb_memorydb;
 use parking_lot::RwLock;
 use rlp::{Rlp, RlpStream};
 use rustc_hex::FromHex;
-use types::transaction::{self, Transaction, LocalizedTransaction, SignedTransaction, Action};
-use types::BlockNumber;
-use types::basic_account::BasicAccount;
-use types::encoded;
-use types::filter::Filter;
-use types::header::Header;
-use types::log_entry::LocalizedLogEntry;
-use types::pruning_info::PruningInfo;
-use types::receipt::{Receipt, LocalizedReceipt, TransactionOutcome};
-use types::view;
-use types::views::BlockView;
-use vm::Schedule;
+use types::{
+	BlockNumber,
+	encoded,
+	engines::epoch::Transition as EpochTransition,
+	ids::{BlockId, TransactionId, UncleId, TraceId},
+	basic_account::BasicAccount,
+	errors::{EthcoreError as Error, EthcoreResult},
+	transaction::{self, Transaction, LocalizedTransaction, SignedTransaction, Action, CallError},
+	filter::Filter,
+	trace_filter::Filter as TraceFilter,
+	call_analytics::CallAnalytics,
+	header::Header,
+	log_entry::LocalizedLogEntry,
+	pruning_info::PruningInfo,
+	receipt::{Receipt, LocalizedReceipt, TransactionOutcome},
+	view,
+	views::BlockView,
+	verification::Unverified,
+	client_types::Mode,
+	blockchain_info::BlockChainInfo,
+	block_status::BlockStatus,
+};
+use vm::{Schedule, LastHashes};
 
 use block::{OpenBlock, SealedBlock, ClosedBlock};
 use call_contract::{CallContract, RegistryInfo};
 use client::{
-	Nonce, Balance, ChainInfo, BlockInfo, ReopenBlock, TransactionInfo,
-	PrepareOpenBlock, BlockChainClient, BlockChainInfo, BlockStatus, BlockId, Mode,
-	TransactionId, UncleId, TraceId, TraceFilter, LastHashes, CallAnalytics,
-	ProvingBlockChainClient, ScheduleInfo, ImportSealedBlock, BroadcastProposalBlock, ImportBlock, StateOrBlock,
-	Call, StateClient, EngineInfo, AccountData, BlockChain, BlockProducer, SealedBlockImporter, IoClient,
-	BadBlocks
+	ReopenBlock, PrepareOpenBlock, ImportSealedBlock, BroadcastProposalBlock, Call,
+	EngineInfo, BlockProducer, SealedBlockImporter,
 };
-use engines::EthEngine;
-use error::{Error, EthcoreResult};
-use executed::CallError;
-use executive::Executed;
+use client_traits::{
+	BlockInfo, Nonce, Balance, ChainInfo, TransactionInfo, BlockChainClient, ImportBlock,
+	AccountData, BlockChain, IoClient, BadBlocks, ScheduleInfo, StateClient, ProvingBlockChainClient,
+	StateOrBlock
+};
+use engine::Engine;
+use machine::executed::Executed;
 use journaldb;
 use miner::{self, Miner, MinerService};
-use spec::Spec;
-use state::StateInfo;
+use spec::{Spec, self};
+use account_state::state::StateInfo;
 use state_db::StateDB;
 use trace::LocalizedTrace;
 use verification::queue::QueueInfo as BlockQueueInfo;
-use verification::queue::kind::blocks::Unverified;
 
 /// Test client.
 pub struct TestBlockChainClient {
@@ -150,7 +161,7 @@ impl TestBlockChainClient {
 
 	/// Creates new test client with specified extra data for each block
 	pub fn new_with_extra_data(extra_data: Bytes) -> Self {
-		let spec = Spec::new_test();
+		let spec = spec::new_test();
 		TestBlockChainClient::new_with_spec_and_extra(spec, extra_data)
 	}
 
@@ -167,9 +178,9 @@ impl TestBlockChainClient {
 		let mut client = TestBlockChainClient {
 			blocks: RwLock::new(HashMap::new()),
 			numbers: RwLock::new(HashMap::new()),
-			genesis_hash: H256::new(),
+			genesis_hash: H256::zero(),
 			extra_data: extra_data,
-			last_hash: RwLock::new(H256::new()),
+			last_hash: RwLock::new(H256::zero()),
 			difficulty: RwLock::new(spec.genesis_header().difficulty().clone()),
 			balances: RwLock::new(HashMap::new()),
 			nonces: RwLock::new(HashMap::new()),
@@ -326,7 +337,7 @@ impl TestBlockChainClient {
 	pub fn corrupt_block_parent(&self, n: BlockNumber) {
 		let hash = self.block_hash(BlockId::Number(n)).unwrap();
 		let mut header: Header = self.block_header(BlockId::Number(n)).unwrap().decode().expect("decoding failed");
-		header.set_parent_hash(H256::from(42));
+		header.set_parent_hash(H256::from_low_u64_be(42));
 		let mut rlp = RlpStream::new_list(3);
 		rlp.append(&header);
 		rlp.append_raw(&::rlp::NULL_RLP, 1);
@@ -416,7 +427,6 @@ impl PrepareOpenBlock for TestBlockChainClient {
 			gas_range_target,
 			extra_data,
 			false,
-			None,
 		)?;
 		// TODO [todr] Override timestamp for predictability
 		open_block.set_timestamp(*self.latest_block_timestamp.read());
@@ -432,7 +442,7 @@ impl ScheduleInfo for TestBlockChainClient {
 
 impl ImportSealedBlock for TestBlockChainClient {
 	fn import_sealed_block(&self, _block: SealedBlock) -> EthcoreResult<H256> {
-		Ok(H256::default())
+		Ok(H256::zero())
 	}
 }
 
@@ -586,7 +596,7 @@ impl ImportBlock for TestBlockChainClient {
 
 impl Call for TestBlockChainClient {
 	// State will not be used by test client anyway, since all methods that accept state are mocked
-	type State = ();
+	type State = TestState;
 
 	fn call(&self, _t: &SignedTransaction, _analytics: CallAnalytics, _state: &mut Self::State, _header: &Header) -> Result<Executed, CallError> {
 		self.execution_result.read().clone().unwrap()
@@ -605,28 +615,32 @@ impl Call for TestBlockChainClient {
 	}
 }
 
-impl StateInfo for () {
+/// NewType wrapper around `()` to impersonate `State` in trait impls. State will not be used by
+/// test client, since all methods that accept state are mocked.
+pub struct TestState;
+
+impl StateInfo for TestState {
 	fn nonce(&self, _address: &Address) -> ethtrie::Result<U256> { unimplemented!() }
 	fn balance(&self, _address: &Address) -> ethtrie::Result<U256> { unimplemented!() }
 	fn storage_at(&self, _address: &Address, _key: &H256) -> ethtrie::Result<H256> { unimplemented!() }
 	fn code(&self, _address: &Address) -> ethtrie::Result<Option<Arc<Bytes>>> { unimplemented!() }
 }
 
+
 impl StateClient for TestBlockChainClient {
-	// State will not be used by test client anyway, since all methods that accept state are mocked
-	type State = ();
+	type State = TestState;
 
 	fn latest_state(&self) -> Self::State {
-		()
+		TestState
 	}
 
 	fn state_at(&self, _id: BlockId) -> Option<Self::State> {
-		Some(())
+		Some(TestState)
 	}
 }
 
 impl EngineInfo for TestBlockChainClient {
-	fn engine(&self) -> &EthEngine {
+	fn engine(&self) -> &dyn Engine {
 		unimplemented!()
 	}
 }
@@ -660,8 +674,16 @@ impl BlockChainClient for TestBlockChainClient {
 		}
 	}
 
-	fn replay_block_transactions(&self, _block: BlockId, _analytics: CallAnalytics) -> Result<Box<Iterator<Item = (H256, Executed)>>, CallError> {
-		Ok(Box::new(self.traces.read().clone().unwrap().into_iter().map(|t| t.transaction_hash.unwrap_or(H256::new())).zip(self.execution_result.read().clone().unwrap().into_iter())))
+	fn replay_block_transactions(&self, _block: BlockId, _analytics: CallAnalytics) -> Result<Box<dyn Iterator<Item = (H256, Executed)>>, CallError> {
+		Ok(Box::new(
+			self.traces
+				.read()
+				.clone()
+				.unwrap()
+				.into_iter()
+				.map(|t| t.transaction_hash.unwrap_or_default())
+				.zip(self.execution_result.read().clone().unwrap().into_iter())
+		))
 	}
 
 	fn block_total_difficulty(&self, _id: BlockId) -> Option<U256> {
@@ -685,9 +707,14 @@ impl BlockChainClient for TestBlockChainClient {
 
 	fn storage_at(&self, address: &Address, position: &H256, state: StateOrBlock) -> Option<H256> {
 		match state {
-			StateOrBlock::Block(BlockId::Latest) => Some(self.storage.read().get(&(address.clone(), position.clone())).cloned().unwrap_or_else(H256::new)),
+			StateOrBlock::Block(BlockId::Latest) =>
+				Some(self.storage.read().get(&(address.clone(), position.clone())).cloned().unwrap_or_default()),
 			_ => None,
 		}
+	}
+
+	fn chain(&self) -> Arc<dyn BlockProvider> {
+		unimplemented!()
 	}
 
 	fn list_accounts(&self, _id: BlockId, _after: Option<&Address>, _count: u64) -> Option<Vec<Address>> {
@@ -773,7 +800,7 @@ impl BlockChainClient for TestBlockChainClient {
 	// works only if blocks are one after another 1 -> 2 -> 3
 	fn tree_route(&self, from: &H256, to: &H256) -> Option<TreeRoute> {
 		Some(TreeRoute {
-			ancestor: H256::new(),
+			ancestor: H256::zero(),
 			index: 0,
 			blocks: {
 				let numbers_read = self.numbers.read();
@@ -808,7 +835,7 @@ impl BlockChainClient for TestBlockChainClient {
 	// TODO: returns just hashes instead of node state rlp(?)
 	fn state_data(&self, hash: &H256) -> Option<Bytes> {
 		// starts with 'f' ?
-		if *hash > H256::from("f000000000000000000000000000000000000000000000000000000000000000") {
+		if *hash > H256::from_str("f000000000000000000000000000000000000000000000000000000000000000").unwrap() {
 			let mut rlp = RlpStream::new();
 			rlp.append(&hash.clone());
 			return Some(rlp.out());
@@ -818,7 +845,7 @@ impl BlockChainClient for TestBlockChainClient {
 
 	fn block_receipts(&self, hash: &H256) -> Option<BlockReceipts> {
 		// starts with 'f' ?
-		if *hash > H256::from("f000000000000000000000000000000000000000000000000000000000000000") {
+		if *hash > H256::from_str("f000000000000000000000000000000000000000000000000000000000000000").unwrap() {
 			let receipt = BlockReceipts::new(vec![Receipt::new(
 				TransactionOutcome::StateRoot(H256::zero()),
 				U256::zero(),
@@ -829,10 +856,6 @@ impl BlockChainClient for TestBlockChainClient {
 	}
 
 	fn clear_queue(&self) {
-	}
-
-	fn additional_params(&self) -> BTreeMap<String, String> {
-		Default::default()
 	}
 
 	fn filter_traces(&self, _filter: TraceFilter) -> Option<Vec<LocalizedTrace>> {
@@ -927,7 +950,7 @@ impl ProvingBlockChainClient for TestBlockChainClient {
 	}
 }
 
-impl super::traits::EngineClient for TestBlockChainClient {
+impl client_traits::EngineClient for TestBlockChainClient {
 	fn update_sealing(&self) {
 		self.miner.update_sealing(self)
 	}
@@ -941,11 +964,11 @@ impl super::traits::EngineClient for TestBlockChainClient {
 
 	fn broadcast_consensus_message(&self, _message: Bytes) {}
 
-	fn epoch_transition_for(&self, _block_hash: H256) -> Option<::engines::EpochTransition> {
+	fn epoch_transition_for(&self, _block_hash: H256) -> Option<EpochTransition> {
 		None
 	}
 
-	fn as_full_client(&self) -> Option<&BlockChainClient> { Some(self) }
+	fn as_full_client(&self) -> Option<&dyn BlockChainClient> { Some(self) }
 
 	fn block_number(&self, id: BlockId) -> Option<BlockNumber> {
 		BlockChainClient::block_number(self, id)

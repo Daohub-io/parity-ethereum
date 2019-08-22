@@ -70,6 +70,10 @@ impl Default for MonoTime {
 pub enum PrivateTxStatus {
 	/// Private tx was created but no validation received yet
 	Created,
+	/// Private state not found locally and being retrived from peers
+	PrivateStateSync,
+	/// Retrieval of the private state failed, transaction not created
+	PrivateStateSyncFailed,
 	/// Several validators (but not all) validated the transaction
 	Validating,
 	/// All validators has validated the private tx
@@ -209,6 +213,17 @@ impl Logging {
 
 	/// Logs the creation of the private transaction
 	pub fn private_tx_created(&self, tx_hash: &H256, validators: &[Address]) {
+		let mut logs = self.logs.write();
+		if let Some(transaction_log) = logs.get_mut(&tx_hash) {
+			if transaction_log.status == PrivateTxStatus::PrivateStateSync {
+				// Transaction was already created before, its private state was being retrieved
+				transaction_log.status = PrivateTxStatus::Created;
+				return;
+			} else {
+				error!(target: "privatetx", "Attempt to create a duplicate transaction");
+				return;
+			}
+		}
 		let mut validator_logs = Vec::new();
 		for account in validators {
 			validator_logs.push(ValidatorLog {
@@ -216,7 +231,6 @@ impl Logging {
 				validation_timestamp: None,
 			});
 		}
-		let mut logs = self.logs.write();
 		if logs.len() > MAX_JOURNAL_LEN {
 			// Remove the oldest log
 			if let Some(tx_hash) = logs.values()
@@ -234,6 +248,22 @@ impl Logging {
 			deployment_timestamp: None,
 			public_tx_hash: None,
 		});
+	}
+
+	/// Private state retrieval started
+	pub fn private_state_request(&self, tx_hash: &H256) {
+		let mut logs = self.logs.write();
+		if let Some(transaction_log) = logs.get_mut(&tx_hash) {
+			transaction_log.status = PrivateTxStatus::PrivateStateSync;
+		}
+	}
+
+	/// Private state retrieval failed
+	pub fn private_state_sync_failed(&self, tx_hash: &H256) {
+		let mut logs = self.logs.write();
+		if let Some(transaction_log) = logs.get_mut(&tx_hash) {
+			transaction_log.status = PrivateTxStatus::PrivateStateSyncFailed;
+		}
 	}
 
 	/// Logs the validation of the private transaction by one of its validators
@@ -292,10 +322,11 @@ impl Drop for Logging {
 mod tests {
 	use serde_json;
 	use error::Error;
-	use ethereum_types::H256;
+	use ethereum_types::{H256, Address};
 	use std::collections::{HashMap, BTreeMap};
 	use std::sync::Arc;
 	use std::time::{SystemTime, Duration};
+	use std::str::FromStr;
 	use types::transaction::Transaction;
 	use parking_lot::RwLock;
 	use super::{TransactionLog, Logging, PrivateTxStatus, LogsSerializer, ValidatorLog};
@@ -360,8 +391,8 @@ mod tests {
 		let logger = Logging::new(Arc::new(StringLogSerializer::new("".into())));
 		let private_tx = Transaction::default();
 		let hash = private_tx.hash(None);
-		logger.private_tx_created(&hash, &vec!["0x82a978b3f5962a5b0957d9ee9eef472ee55b42f1".into()]);
-		logger.signature_added(&hash, &"0x82a978b3f5962a5b0957d9ee9eef472ee55b42f1".into());
+		logger.private_tx_created(&hash, &vec![Address::from_str("82a978b3f5962a5b0957d9ee9eef472ee55b42f1").unwrap()]);
+		logger.signature_added(&hash, &Address::from_str("82a978b3f5962a5b0957d9ee9eef472ee55b42f1").unwrap());
 		logger.tx_deployed(&hash, &hash);
 		let tx_log = logger.tx_log(&hash).unwrap();
 		assert_eq!(tx_log.status, PrivateTxStatus::Deployed);
@@ -371,35 +402,35 @@ mod tests {
 	fn serialization() {
 		let current_timestamp = SystemTime::now();
 		let initial_validator_log = ValidatorLog {
-			account: "0x82a978b3f5962a5b0957d9ee9eef472ee55b42f1".into(),
+			account: Address::from_str("82a978b3f5962a5b0957d9ee9eef472ee55b42f1").unwrap(),
 			validation_timestamp: Some(current_timestamp.checked_add(Duration::from_secs(1)).unwrap()),
 		};
 		let initial_log = TransactionLog {
-			tx_hash: "0x64f648ca7ae7f4138014f860ae56164d8d5732969b1cea54d8be9d144d8aa6f6".into(),
+			tx_hash: H256::from_str("64f648ca7ae7f4138014f860ae56164d8d5732969b1cea54d8be9d144d8aa6f6").unwrap(),
 			status: PrivateTxStatus::Deployed,
 			creation_timestamp: current_timestamp,
 			validators: vec![initial_validator_log],
 			deployment_timestamp: Some(current_timestamp.checked_add(Duration::from_secs(2)).unwrap()),
-			public_tx_hash: Some("0x69b9c691ede7993effbcc88911c309af1c82be67b04b3882dd446b808ae146da".into()),
+			public_tx_hash: Some(H256::from_str("69b9c691ede7993effbcc88911c309af1c82be67b04b3882dd446b808ae146da").unwrap()),
 		};
 		let serializer = Arc::new(StringLogSerializer::new(serde_json::to_string(&vec![initial_log.clone()]).unwrap()));
 		let logger = Logging::new(serializer.clone());
-		let hash: H256 = "0x63c715e88f7291e66069302f6fcbb4f28a19ef5d7cbd1832d0c01e221c0061c6".into();
-		logger.private_tx_created(&hash, &vec!["0x7ffbe3512782069be388f41be4d8eb350672d3a5".into()]);
-		logger.signature_added(&hash, &"0x7ffbe3512782069be388f41be4d8eb350672d3a5".into());
-		logger.tx_deployed(&hash, &"0xde2209a8635b9cab9eceb67928b217c70ab53f6498e5144492ec01e6f43547d7".into());
+		let hash = H256::from_str("63c715e88f7291e66069302f6fcbb4f28a19ef5d7cbd1832d0c01e221c0061c6").unwrap();
+		logger.private_tx_created(&hash, &vec![Address::from_str("7ffbe3512782069be388f41be4d8eb350672d3a5").unwrap()]);
+		logger.signature_added(&hash, &Address::from_str("7ffbe3512782069be388f41be4d8eb350672d3a5").unwrap());
+		logger.tx_deployed(&hash, &H256::from_str("de2209a8635b9cab9eceb67928b217c70ab53f6498e5144492ec01e6f43547d7").unwrap());
 		drop(logger);
 		let added_validator_log = ValidatorLog {
-			account: "0x7ffbe3512782069be388f41be4d8eb350672d3a5".into(),
+			account: Address::from_str("7ffbe3512782069be388f41be4d8eb350672d3a5").unwrap(),
 			validation_timestamp: Some(current_timestamp.checked_add(Duration::from_secs(7)).unwrap()),
 		};
 		let added_log = TransactionLog {
-			tx_hash: "0x63c715e88f7291e66069302f6fcbb4f28a19ef5d7cbd1832d0c01e221c0061c6".into(),
+			tx_hash: H256::from_str("63c715e88f7291e66069302f6fcbb4f28a19ef5d7cbd1832d0c01e221c0061c6").unwrap(),
 			status: PrivateTxStatus::Deployed,
 			creation_timestamp: current_timestamp.checked_add(Duration::from_secs(6)).unwrap(),
 			validators: vec![added_validator_log],
 			deployment_timestamp: Some(current_timestamp.checked_add(Duration::from_secs(8)).unwrap()),
-			public_tx_hash: Some("0xde2209a8635b9cab9eceb67928b217c70ab53f6498e5144492ec01e6f43547d7".into()),
+			public_tx_hash: Some(H256::from_str("de2209a8635b9cab9eceb67928b217c70ab53f6498e5144492ec01e6f43547d7").unwrap()),
 		};
 		let should_be_final = vec![added_log, initial_log];
 		let deserialized_logs: Vec<TransactionLog> = serde_json::from_str(&serializer.log()).unwrap();

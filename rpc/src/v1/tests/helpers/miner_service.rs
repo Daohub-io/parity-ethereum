@@ -20,22 +20,25 @@ use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bytes::Bytes;
+use client_traits::{Nonce, StateClient};
+use engine::{Engine, signer::EngineSigner};
 use ethcore::block::SealedBlock;
-use ethcore::client::{Nonce, PrepareOpenBlock, StateClient, EngineInfo};
-use ethcore::engines::{EthEngine, signer::EngineSigner};
-use ethcore::error::Error;
-use ethcore::miner::{self, MinerService, AuthoringParams};
+use ethcore::client::{PrepareOpenBlock, EngineInfo, TestState};
+use ethcore::miner::{self, MinerService, AuthoringParams, FilterOptions};
 use ethereum_types::{H256, U256, Address};
 use miner::pool::local_transactions::Status as LocalTransactionStatus;
 use miner::pool::{verifier, VerifiedTransaction, QueueStatus};
 use parking_lot::{RwLock, Mutex};
-use types::transaction::{self, UnverifiedTransaction, SignedTransaction, PendingTransaction};
 use txpool;
-use types::BlockNumber;
-use types::block::Block;
-use types::header::Header;
-use types::ids::BlockId;
-use types::receipt::RichReceipt;
+use types::{
+	BlockNumber,
+	block::Block,
+	header::Header,
+	errors::EthcoreError as Error,
+	ids::BlockId,
+	receipt::RichReceipt,
+	transaction::{self, UnverifiedTransaction, SignedTransaction, PendingTransaction},
+};
 
 /// Test miner service.
 pub struct TestMinerService {
@@ -87,25 +90,25 @@ impl TestMinerService {
 
 impl StateClient for TestMinerService {
 	// State will not be used by test client anyway, since all methods that accept state are mocked
-	type State = ();
+	type State = TestState;
 
 	fn latest_state(&self) -> Self::State {
-		()
+		TestState
 	}
 
 	fn state_at(&self, _id: BlockId) -> Option<Self::State> {
-		Some(())
+		Some(TestState)
 	}
 }
 
 impl EngineInfo for TestMinerService {
-	fn engine(&self) -> &EthEngine {
+	fn engine(&self) -> &Engine {
 		unimplemented!()
 	}
 }
 
 impl MinerService for TestMinerService {
-	type State = ();
+	type State = TestState;
 
 	fn pending_state(&self, _latest_block_number: BlockNumber) -> Option<Self::State> {
 		None
@@ -219,6 +222,10 @@ impl MinerService for TestMinerService {
 	}
 
 	fn ready_transactions<C>(&self, _chain: &C, _max_len: usize, _ordering: miner::PendingOrdering) -> Vec<Arc<VerifiedTransaction>> {
+		self.queued_transactions()
+	}
+
+	fn ready_transactions_filtered<C>(&self, _chain: &C, _max_len: usize, _filter: Option<FilterOptions>, _ordering: miner::PendingOrdering) -> Vec<Arc<VerifiedTransaction>> {
 		self.queued_transactions()
 	}
 

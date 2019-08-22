@@ -16,7 +16,6 @@
 
 use ethjson;
 use trie::{TrieFactory, TrieSpec};
-use ethtrie::RlpCodec;
 use ethereum_types::H256;
 
 use super::HookType;
@@ -28,14 +27,14 @@ pub use self::secure::run_test_file as run_secure_test_file;
 
 fn test_trie<H: FnMut(&str, HookType)>(json: &[u8], trie: TrieSpec, start_stop_hook: &mut H) -> Vec<String> {
 	let tests = ethjson::trie::Test::load(json).unwrap();
-	let factory = TrieFactory::<_, RlpCodec>::new(trie);
+	let factory = TrieFactory::new(trie, ethtrie::Layout);
 	let mut result = vec![];
 
 	for (name, test) in tests.into_iter() {
 		start_stop_hook(&name, HookType::OnStart);
 
 		let mut memdb = journaldb::new_memory_db();
-		let mut root = H256::default();
+		let mut root = H256::zero();
 		let mut t = factory.create(&mut memdb, &mut root);
 
 		for (key, value) in test.input.data.into_iter() {

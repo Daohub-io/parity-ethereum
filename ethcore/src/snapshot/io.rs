@@ -28,8 +28,10 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use ethereum_types::H256;
 use rlp::{RlpStream, Rlp};
-
-use super::ManifestData;
+use types::{
+	errors::{SnapshotError, EthcoreError},
+	snapshot::ManifestData,
+};
 
 const SNAPSHOT_VERSION: u64 = 2;
 
@@ -206,7 +208,7 @@ impl PackedReader {
 	/// Create a new `PackedReader` for the file at the given path.
 	/// This will fail if any io errors are encountered or the file
 	/// is not a valid packed snapshot.
-	pub fn new(path: &Path) -> Result<Option<Self>, ::snapshot::error::Error> {
+	pub fn new(path: &Path) -> Result<Option<Self>, SnapshotError> {
 		let mut file = File::open(path)?;
 		let file_len = file.metadata()?.len();
 		if file_len < 8 {
@@ -246,7 +248,7 @@ impl PackedReader {
 		};
 
 		if version > SNAPSHOT_VERSION {
-			return Err(::snapshot::error::Error::VersionNotSupported(version));
+			return Err(SnapshotError::VersionNotSupported(version));
 		}
 
 		let state: Vec<ChunkInfo> = rlp.list_at(0 + start)?;
@@ -299,7 +301,7 @@ pub struct LooseReader {
 impl LooseReader {
 	/// Create a new `LooseReader` which will read the manifest and chunk data from
 	/// the given directory.
-	pub fn new(mut dir: PathBuf) -> Result<Self, ::error::Error> {
+	pub fn new(mut dir: PathBuf) -> Result<Self, EthcoreError> {
 		let mut manifest_buf = Vec::new();
 
 		dir.push("MANIFEST");
@@ -310,10 +312,7 @@ impl LooseReader {
 
 		dir.pop();
 
-		Ok(LooseReader {
-			dir: dir,
-			manifest: manifest,
-		})
+		Ok(LooseReader { dir, manifest })
 	}
 }
 

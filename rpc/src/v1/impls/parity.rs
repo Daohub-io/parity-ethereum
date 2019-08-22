@@ -16,22 +16,26 @@
 
 //! Parity-specific rpc implementation.
 use std::sync::Arc;
-use std::str::FromStr;
 use std::collections::BTreeMap;
 
 use crypto::DEFAULT_MAC;
-use ethereum_types::{Address, H64, H160, H256, H512, U64, U256};
-use ethcore::client::{BlockChainClient, StateClient, Call};
-use ethcore::miner::{self, MinerService};
-use ethcore::snapshot::{SnapshotService, RestorationStatus};
-use ethcore::state::StateInfo;
+use ethereum_types::{H64, H160, H256, H512, U64, U256};
+use ethcore::client::Call;
+use client_traits::{BlockChainClient, StateClient};
+use ethcore::miner::{self, MinerService, FilterOptions};
+use ethcore::snapshot::SnapshotService;
+use account_state::state::StateInfo;
 use ethcore_logger::RotatingLogger;
 use ethkey::{crypto::ecies, Brain, Generator};
 use ethstore::random_phrase;
 use jsonrpc_core::futures::future;
 use jsonrpc_core::{BoxFuture, Result};
 use sync::{SyncProvider, ManageNetwork};
-use types::ids::BlockId;
+use types::{
+	ids::BlockId,
+	verification::Unverified,
+	snapshot::RestorationStatus,
+};
 use updater::{Service as UpdateService};
 use version::version_data;
 
@@ -49,7 +53,6 @@ use v1::types::{
 	block_number_to_id
 };
 use Host;
-use ethcore::verification::queue::kind::blocks::Unverified;
 
 /// Parity implementation.
 pub struct ParityClient<C, M, U> {
@@ -165,12 +168,7 @@ impl<C, M, U, S> Parity for ParityClient<C, M, U> where
 	}
 
 	fn registry_address(&self) -> Result<Option<H160>> {
-		Ok(
-			self.client
-				.additional_params()
-				.get("registrar")
-				.and_then(|s| Address::from_str(s).ok())
-		)
+		Ok(self.client.registrar_address())
 	}
 
 	fn rpc_settings(&self) -> Result<RpcSettings> {
@@ -245,10 +243,11 @@ impl<C, M, U, S> Parity for ParityClient<C, M, U> where
 			.map(Into::into)
 	}
 
-	fn pending_transactions(&self, limit: Option<usize>) -> Result<Vec<Transaction>> {
-		let ready_transactions = self.miner.ready_transactions(
+	fn pending_transactions(&self, limit: Option<usize>, filter: Option<FilterOptions>) -> Result<Vec<Transaction>> {
+		let ready_transactions = self.miner.ready_transactions_filtered(
 			&*self.client,
 			limit.unwrap_or_else(usize::max_value),
+			filter,
 			miner::PendingOrdering::Priority,
 		);
 
@@ -355,6 +354,7 @@ impl<C, M, U, S> Parity for ParityClient<C, M, U> where
 			(header.encoded(), None)
 		} else {
 			let id = match number {
+				BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 				BlockNumber::Num(num) => BlockId::Number(num),
 				BlockNumber::Earliest => BlockId::Earliest,
 				BlockNumber::Latest => BlockId::Latest,
@@ -386,6 +386,7 @@ impl<C, M, U, S> Parity for ParityClient<C, M, U> where
 					.collect()
 				))
 			},
+			BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 			BlockNumber::Num(num) => BlockId::Number(num),
 			BlockNumber::Earliest => BlockId::Earliest,
 			BlockNumber::Latest => BlockId::Latest,
@@ -417,6 +418,7 @@ impl<C, M, U, S> Parity for ParityClient<C, M, U> where
 			(state, header)
 		} else {
 			let id = match num {
+				BlockNumber::Hash { hash, .. } => BlockId::Hash(hash),
 				BlockNumber::Num(num) => BlockId::Number(num),
 				BlockNumber::Earliest => BlockId::Earliest,
 				BlockNumber::Latest => BlockId::Latest,

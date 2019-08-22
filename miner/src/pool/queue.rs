@@ -33,7 +33,7 @@ use pool::{
 };
 use pool::local_transactions::LocalTransactionsList;
 
-type Listener = (LocalTransactionsList, (listener::Notifier, (listener::Logger, listener::TransactionsPoolNotifier)));
+type Listener = (LocalTransactionsList, (listener::TransactionsPoolNotifier, listener::Logger));
 type Pool = txpool::Pool<pool::VerifiedTransaction, scoring::NonceAndGasPrice, Listener>;
 
 /// Max cache time in milliseconds for pending transactions.
@@ -241,10 +241,10 @@ impl TransactionQueue {
 	///
 	/// Given blockchain and state access (Client)
 	/// verifies and imports transactions to the pool.
-	pub fn import<C: client::Client + client::NonceClient + Clone>(
+	pub fn import<T: IntoIterator<Item = verifier::Transaction>, C: client::Client + client::NonceClient + Clone>(
 		&self,
 		client: C,
-		transactions: Vec<verifier::Transaction>,
+		transactions: T,
 	) -> Vec<Result<(), transaction::Error>> {
 		// Run verification
 		trace_time!("pool::verify_and_import");
@@ -304,8 +304,6 @@ impl TransactionQueue {
 
 		// Notify about imported transactions.
 		(self.pool.write().listener_mut().1).0.notify();
-
-		((self.pool.write().listener_mut().1).1).1.notify();
 
 		if results.iter().any(|r| r.is_ok()) {
 			self.cached_pending.write().clear();
@@ -499,7 +497,7 @@ impl TransactionQueue {
 	/// removes them from the pool.
 	/// That method should be used if invalid transactions are detected
 	/// or you want to cancel a transaction.
-	pub fn remove<'a, T: IntoIterator<Item = &'a H256>>(
+	pub fn remove<'a, T: IntoIterator<Item=&'a H256>>(
 		&self,
 		hashes: T,
 		is_invalid: bool,
@@ -571,16 +569,16 @@ impl TransactionQueue {
 		self.pool.read().listener().0.all_transactions().iter().map(|(a, b)| (*a, b.clone())).collect()
 	}
 
-	/// Add a callback to be notified about all transactions entering the pool.
-	pub fn add_listener(&self, f: Box<Fn(&[H256]) + Send + Sync>) {
+	/// Add a listener to be notified about all transactions the pool
+	pub fn add_pending_listener(&self, f: mpsc::UnboundedSender<Arc<Vec<H256>>>) {
 		let mut pool = self.pool.write();
-		(pool.listener_mut().1).0.add(f);
+		(pool.listener_mut().1).0.add_pending_listener(f);
 	}
 
 	/// Add a listener to be notified about all transactions the pool
-	pub fn add_tx_pool_listener(&self, f: mpsc::UnboundedSender<Arc<Vec<(H256, TxStatus)>>>) {
+	pub fn add_full_listener(&self, f: mpsc::UnboundedSender<Arc<Vec<(H256, TxStatus)>>>) {
 		let mut pool = self.pool.write();
-		((pool.listener_mut().1).1).1.add(f);
+		(pool.listener_mut().1).0.add_full_listener(f);
 	}
 
 	/// Check if pending set is cached.
@@ -596,7 +594,7 @@ fn convert_error<H: fmt::Debug + fmt::LowerHex>(err: txpool::Error<H>) -> transa
 	match err {
 		Error::AlreadyImported(..) => transaction::Error::AlreadyImported,
 		Error::TooCheapToEnter(..) => transaction::Error::LimitReached,
-		Error::TooCheapToReplace(..) => transaction::Error::TooCheapToReplace
+		Error::TooCheapToReplace(..) => transaction::Error::TooCheapToReplace { prev: None, new: None }
 	}
 }
 

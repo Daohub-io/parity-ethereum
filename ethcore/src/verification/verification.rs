@@ -24,47 +24,28 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
 use hash::keccak;
-use heapsize::HeapSizeOf;
 use rlp::Rlp;
 use triehash::ordered_trie_root;
 use unexpected::{Mismatch, OutOfBounds};
 
 use blockchain::*;
 use call_contract::CallContract;
-use client::BlockInfo;
-use engines::{EthEngine, MAX_UNCLE_AGE};
-use error::{BlockError, Error};
-use types::{BlockNumber, header::Header};
-use types::transaction::SignedTransaction;
-use verification::queue::kind::blocks::Unverified;
+use client_traits::BlockInfo;
+use engine::Engine;
+use types::{
+	BlockNumber,
+	header::Header,
+	errors::{EthcoreError as Error, BlockError},
+	engines::MAX_UNCLE_AGE,
+	block::PreverifiedBlock,
+	verification::Unverified,
+};
 
-#[cfg(not(time_checked_add))]
 use time_utils::CheckedSystemTime;
 
-/// Preprocessed block data gathered in `verify_block_unordered` call
-pub struct PreverifiedBlock {
-	/// Populated block header
-	pub header: Header,
-	/// Populated block transactions
-	pub transactions: Vec<SignedTransaction>,
-	/// Populated block uncles
-	pub uncles: Vec<Header>,
-	/// Block bytes
-	pub bytes: Bytes,
-}
-
-impl HeapSizeOf for PreverifiedBlock {
-	fn heap_size_of_children(&self) -> usize {
-		self.header.heap_size_of_children()
-			+ self.transactions.heap_size_of_children()
-			+ self.bytes.heap_size_of_children()
-	}
-}
-
 /// Phase 1 quick block verification. Only does checks that are cheap. Operates on a single block
-pub fn verify_block_basic(block: &Unverified, engine: &EthEngine, check_seal: bool) -> Result<(), Error> {
+pub fn verify_block_basic(block: &Unverified, engine: &dyn Engine, check_seal: bool) -> Result<(), Error> {
 	verify_header_params(&block.header, engine, true, check_seal)?;
 	verify_block_integrity(block)?;
 
@@ -89,7 +70,7 @@ pub fn verify_block_basic(block: &Unverified, engine: &EthEngine, check_seal: bo
 /// Phase 2 verification. Perform costly checks such as transaction signatures and block nonce for ethash.
 /// Still operates on a individual block
 /// Returns a `PreverifiedBlock` structure populated with transactions
-pub fn verify_block_unordered(block: Unverified, engine: &EthEngine, check_seal: bool) -> Result<PreverifiedBlock, Error> {
+pub fn verify_block_unordered(block: Unverified, engine: &dyn Engine, check_seal: bool) -> Result<PreverifiedBlock, Error> {
 	let header = block.header;
 	if check_seal {
 		engine.verify_block_unordered(&header)?;
@@ -107,7 +88,7 @@ pub fn verify_block_unordered(block: Unverified, engine: &EthEngine, check_seal:
 	let transactions = block.transactions
 		.into_iter()
 		.map(|t| {
-			let t = engine.verify_transaction_unordered(t, &header)?;
+			let t = t.verify_unordered()?;
 			if let Some(max_nonce) = nonce_cap {
 				if t.nonce >= max_nonce {
 					return Err(BlockError::TooManyTransactions(t.sender()).into());
@@ -131,14 +112,14 @@ pub struct FullFamilyParams<'a, C: BlockInfo + CallContract + 'a> {
 	pub block: &'a PreverifiedBlock,
 
 	/// Block provider to use during verification
-	pub block_provider: &'a BlockProvider,
+	pub block_provider: &'a dyn BlockProvider,
 
 	/// Engine client to use during verification
 	pub client: &'a C,
 }
 
 /// Phase 3 verification. Check block information against parent and uncles.
-pub fn verify_block_family<C: BlockInfo + CallContract>(header: &Header, parent: &Header, engine: &EthEngine, do_full: Option<FullFamilyParams<C>>) -> Result<(), Error> {
+pub fn verify_block_family<C: BlockInfo + CallContract>(header: &Header, parent: &Header, engine: &dyn Engine, do_full: Option<FullFamilyParams<C>>) -> Result<(), Error> {
 	// TODO: verify timestamp
 	verify_parent(&header, &parent, engine)?;
 	engine.verify_block_family(&header, &parent)?;
@@ -159,7 +140,7 @@ pub fn verify_block_family<C: BlockInfo + CallContract>(header: &Header, parent:
 	Ok(())
 }
 
-fn verify_uncles(block: &PreverifiedBlock, bc: &BlockProvider, engine: &EthEngine) -> Result<(), Error> {
+fn verify_uncles(block: &PreverifiedBlock, bc: &dyn BlockProvider, engine: &dyn Engine) -> Result<(), Error> {
 	let header = &block.header;
 	let num_uncles = block.uncles.len();
 	let max_uncles = engine.maximum_uncle_count(header.number());
@@ -267,7 +248,7 @@ pub fn verify_block_final(expected: &Header, got: &Header) -> Result<(), Error> 
 }
 
 /// Check basic header parameters.
-pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool, check_seal: bool) -> Result<(), Error> {
+pub fn verify_header_params(header: &Header, engine: &dyn Engine, is_full: bool, check_seal: bool) -> Result<(), Error> {
 	if check_seal {
 		let expected_seal_fields = engine.seal_fields(header);
 		if header.seal().len() != expected_seal_fields {
@@ -289,7 +270,7 @@ pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool, 
 	}
 	if let Some(limit) = engine.maximum_gas_limit() {
 		if header.gas_limit() > &limit {
-			return Err(From::from(::error::BlockError::InvalidGasLimit(OutOfBounds { min: None, max: Some(limit), found: *header.gas_limit() })));
+			return Err(From::from(BlockError::InvalidGasLimit(OutOfBounds { min: None, max: Some(limit), found: *header.gas_limit() })));
 		}
 	}
 	let maximum_extra_data_size = engine.maximum_extra_data_size();
@@ -310,7 +291,7 @@ pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool, 
 		// this will resist overflow until `year 2037`
 		let max_time = SystemTime::now() + ACCEPTABLE_DRIFT;
 		let invalid_threshold = max_time + ACCEPTABLE_DRIFT * 9;
-		let timestamp = UNIX_EPOCH.checked_add(Duration::from_secs(header.timestamp()))
+		let timestamp = CheckedSystemTime::checked_add(UNIX_EPOCH, Duration::from_secs(header.timestamp()))
 			.ok_or(BlockError::TimestampOverflow)?;
 
 		if timestamp > invalid_threshold {
@@ -326,7 +307,7 @@ pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool, 
 }
 
 /// Check header parameters agains parent header.
-fn verify_parent(header: &Header, parent: &Header, engine: &EthEngine) -> Result<(), Error> {
+fn verify_parent(header: &Header, parent: &Header, engine: &dyn Engine) -> Result<(), Error> {
 	assert!(header.parent_hash().is_zero() || &parent.hash() == header.parent_hash(),
 			"Parent hash should already have been verified; qed");
 
@@ -334,9 +315,9 @@ fn verify_parent(header: &Header, parent: &Header, engine: &EthEngine) -> Result
 
 	if !engine.is_timestamp_valid(header.timestamp(), parent.timestamp()) {
 		let now = SystemTime::now();
-		let min = now.checked_add(Duration::from_secs(parent.timestamp().saturating_add(1)))
+		let min = CheckedSystemTime::checked_add(now, Duration::from_secs(parent.timestamp().saturating_add(1)))
 			.ok_or(BlockError::TimestampOverflow)?;
-		let found = now.checked_add(Duration::from_secs(header.timestamp()))
+		let found = CheckedSystemTime::checked_add(now, Duration::from_secs(header.timestamp()))
 			.ok_or(BlockError::TimestampOverflow)?;
 		return Err(From::from(BlockError::InvalidTimestamp(OutOfBounds { max: None, min: Some(min), found }.into())))
 	}
@@ -385,17 +366,21 @@ mod tests {
 
 	use std::collections::{BTreeMap, HashMap};
 	use std::time::{SystemTime, UNIX_EPOCH};
-	use ethereum_types::{H256, BloomRef, U256};
+	use ethereum_types::{H256, BloomRef, U256, Address};
 	use blockchain::{BlockDetails, TransactionAddress, BlockReceipts};
-	use types::encoded;
+	use bytes::Bytes;
 	use hash::keccak;
-	use engines::EthEngine;
-	use error::BlockError::*;
+	use engine::Engine;
 	use ethkey::{Random, Generator};
-	use spec::{CommonParams, Spec};
+	use crate::spec;
 	use test_helpers::{create_test_block_with_data, create_test_block};
-	use types::transaction::{SignedTransaction, Transaction, UnverifiedTransaction, Action};
-	use types::log_entry::{LogEntry, LocalizedLogEntry};
+	use types::{
+		encoded,
+		engines::params::CommonParams,
+		errors::BlockError::*,
+		transaction::{SignedTransaction, Transaction, UnverifiedTransaction, Action},
+		log_entry::{LogEntry, LocalizedLogEntry},
+	};
 	use rlp;
 	use triehash::ordered_trie_root;
 
@@ -516,12 +501,12 @@ mod tests {
 		}
 	}
 
-	fn basic_test(bytes: &[u8], engine: &EthEngine) -> Result<(), Error> {
+	fn basic_test(bytes: &[u8], engine: &dyn Engine) -> Result<(), Error> {
 		let unverified = Unverified::from_rlp(bytes.to_vec())?;
 		verify_block_basic(&unverified, engine, true)
 	}
 
-	fn family_test<BC>(bytes: &[u8], engine: &EthEngine, bc: &BC) -> Result<(), Error> where BC: BlockProvider {
+	fn family_test<BC>(bytes: &[u8], engine: &dyn Engine, bc: &BC) -> Result<(), Error> where BC: BlockProvider {
 		let block = Unverified::from_rlp(bytes.to_vec()).unwrap();
 		let header = block.header;
 		let transactions: Vec<_> = block.transactions
@@ -547,13 +532,13 @@ mod tests {
 
 		let full_params = FullFamilyParams {
 			block: &block,
-			block_provider: bc as &BlockProvider,
+			block_provider: bc as &dyn BlockProvider,
 			client: &client,
 		};
 		verify_block_family(&block.header, &parent, engine, Some(full_params))
 	}
 
-	fn unordered_test(bytes: &[u8], engine: &EthEngine) -> Result<(), Error> {
+	fn unordered_test(bytes: &[u8], engine: &dyn Engine) -> Result<(), Error> {
 		let un = Unverified::from_rlp(bytes.to_vec())?;
 		verify_block_unordered(un, engine, false)?;
 		Ok(())
@@ -561,7 +546,7 @@ mod tests {
 
 	#[test]
 	fn test_verify_block_basic_with_invalid_transactions() {
-		let spec = Spec::new_test();
+		let spec = spec::new_test();
 		let engine = &*spec.engine;
 
 		let block = {
@@ -586,7 +571,7 @@ mod tests {
 
 		// Test against morden
 		let mut good = Header::new();
-		let spec = Spec::new_test();
+		let spec = spec::new_test();
 		let engine = &*spec.engine;
 
 		let min_gas_limit = engine.params().min_gas_limit;
@@ -615,7 +600,7 @@ mod tests {
 		}.sign(keypair.secret(), None);
 
 		let tr3 = Transaction {
-			action: Action::Call(0x0.into()),
+			action: Action::Call(Address::from_low_u64_be(0x0)),
 			value: U256::from(0),
 			data: Bytes::new(),
 			gas: U256::from(30_000),
@@ -796,8 +781,8 @@ mod tests {
 	fn dust_protection() {
 		use ethkey::{Generator, Random};
 		use types::transaction::{Transaction, Action};
-		use machine::EthereumMachine;
-		use engines::NullEngine;
+		use machine::Machine;
+		use null_engine::NullEngine;
 
 		let mut params = CommonParams::default();
 		params.dust_protection_transition = 0;
@@ -818,7 +803,7 @@ mod tests {
 
 		let good_transactions = [bad_transactions[0].clone(), bad_transactions[1].clone()];
 
-		let machine = EthereumMachine::regular(params, BTreeMap::new());
+		let machine = Machine::regular(params, BTreeMap::new());
 		let engine = NullEngine::new(Default::default(), machine);
 		check_fail(unordered_test(&create_test_block_with_data(&header, &bad_transactions, &[]), &engine), TooManyTransactions(keypair.address()));
 		unordered_test(&create_test_block_with_data(&header, &good_transactions, &[]), &engine).unwrap();

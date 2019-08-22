@@ -61,6 +61,8 @@ mod accounts {
 mod accounts {
 	use super::*;
 	use upgrade::upgrade_key_location;
+	use ethereum_types::H160;
+	use std::str::FromStr;
 
 	pub use accounts::AccountProvider;
 
@@ -81,7 +83,7 @@ mod accounts {
 			blacklisted_accounts: 	match *spec {
 				SpecType::Morden | SpecType::Ropsten | SpecType::Kovan | SpecType::Sokol | SpecType::Dev => vec![],
 				_ => vec![
-					"00a329c0648769a73afac7f9381e08fb43dbea72".into()
+					H160::from_str("00a329c0648769a73afac7f9381e08fb43dbea72").expect("the string is valid hex; qed"),
 				],
 			},
 		};
@@ -131,7 +133,7 @@ mod accounts {
 	}
 
 	pub fn miner_author(spec: &SpecType, dirs: &Directories, account_provider: &Arc<AccountProvider>, engine_signer: Address, passwords: &[Password]) -> Result<Option<::ethcore::miner::Author>, String> {
-		use ethcore::engines::EngineSigner;
+		use engine::signer::EngineSigner;
 
 		// Check if engine signer exists
 		if !account_provider.has_account(engine_signer) {
@@ -239,4 +241,3 @@ pub use self::accounts::{
 	private_tx_signer,
 	accounts_list,
 };
-

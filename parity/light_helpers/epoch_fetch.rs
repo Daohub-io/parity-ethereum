@@ -16,12 +16,13 @@
 
 use std::sync::{Arc, Weak};
 
-use ethcore::engines::{EthEngine, StateDependentProof};
-use ethcore::machine::EthereumMachine;
+use engine::{Engine, StateDependentProof};
 use sync::{LightSync, LightNetworkDispatcher};
-use types::encoded;
-use types::header::Header;
-use types::receipt::Receipt;
+use types::{
+	header::Header,
+	encoded,
+	receipt::Receipt,
+};
 
 use futures::{future, Future};
 use futures::future::Either;
@@ -82,7 +83,7 @@ impl ChainDataFetcher for EpochFetch {
 	}
 
 	/// Fetch epoch transition proof at given header.
-	fn epoch_transition(&self, hash: H256, engine: Arc<EthEngine>, checker: Arc<StateDependentProof<EthereumMachine>>)
+	fn epoch_transition(&self, hash: H256, engine: Arc<Engine>, checker: Arc<StateDependentProof>)
 		-> Self::Transition
 	{
 		self.request(request::Signal {
